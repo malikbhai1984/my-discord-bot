@@ -1,71 +1,58 @@
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
 
-// Debug environment variables
-console.log('🚀 Starting Discord Bot...');
-console.log('🔧 Token available:', !!process.env.TOKEN);
-console.log('🔧 API Key available:', !!process.env.API_FOOTBALL);
-console.log('🔧 Token length:', process.env.TOKEN?.length);
+// Load environment variables (for local testing, optional if using Railway env vars)
+import dotenv from "dotenv";
+dotenv.config();
 
+// Check environment variables
+const token = process.env.TOKEN || process.env.DISCORD_TOKEN;
+const apiFootballKey = process.env.API_FOOTBALL;
+
+console.log('🚀 Starting Discord Bot...');
+console.log('🔧 Token available:', !!token);
+console.log('🔧 API Key available:', !!apiFootballKey);
+console.log('🔧 Token length:', token?.length);
+
+if (!token) {
+  console.error('❌ No TOKEN found in environment variables. Please set TOKEN in Railway or locally in .env');
+  process.exit(1);
+}
+
+if (!apiFootballKey) {
+  console.warn('⚠️ API_FOOTBALL key not found. Prediction or matches may not work.');
+}
+
+// Create Discord client
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent]
 });
 
+// Define commands
 const commands = [
-  new SlashCommandBuilder()
-    .setName('ping')
-    .setDescription('Replies with Pong!'),
-  
-  new SlashCommandBuilder()
-    .setName('predict')
-    .setDescription('Get football predictions'),
-  
-  new SlashCommandBuilder()
-    .setName('help')
-    .setDescription('Show all commands'),
-  
-  new SlashCommandBuilder()
-    .setName('matches')
-    .setDescription('Get live football matches')
-].map(command => command.toJSON());
-
-// Simple matches function (temporary)
-async function fetchMatches() {
-  try {
-    console.log('🔧 Fetching matches...');
-    // Temporary response - API fix baad mein karenge
-    return [
-      { teams: { home: { name: 'Man United' }, away: { name: 'Liverpool' } }, fixture: { status: { long: 'Live' } } },
-      { teams: { home: { name: 'Arsenal' }, away: { name: 'Chelsea' } }, fixture: { status: { long: 'Half Time' } } }
-    ];
-  } catch (error) {
-    console.error('Match fetch error:', error);
-    return [];
-  }
-}
+  new SlashCommandBuilder().setName('ping').setDescription('Replies with Pong!'),
+  new SlashCommandBuilder().setName('predict').setDescription('Get football predictions'),
+  new SlashCommandBuilder().setName('help').setDescription('Show all commands'),
+  new SlashCommandBuilder().setName('matches').setDescription('Get live football matches')
+].map(cmd => cmd.toJSON());
 
 // Register slash commands
 async function registerCommands() {
   try {
-    if (!process.env.TOKEN) {
-      console.log('❌ No token found for command registration');
-      return;
-    }
-    
     console.log('📋 Registering slash commands...');
-    
-    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-    
+    const rest = new REST({ version: '10' }).setToken(token);
+
     await rest.put(
       Routes.applicationCommands(client.user?.id || '123456789012345678'),
       { body: commands }
     );
-    
+
     console.log('✅ Slash commands registered!');
-  } catch (error) {
-    console.error('❌ Error registering commands:', error);
+  } catch (err) {
+    console.error('❌ Error registering commands:', err);
   }
 }
 
+// Ready event
 client.once('ready', async () => {
   console.log(`✅ ${client.user.tag} is online!`);
   console.log(`🔗 Invite link: https://discord.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20applications.commands`);
@@ -78,75 +65,43 @@ client.on('interactionCreate', async (interaction) => {
 
   console.log(`🎯 Command: /${interaction.commandName}`);
 
-  if (interaction.commandName === 'ping') {
-    await interaction.reply('🏓 Pong! Bot is working perfectly! 🎉');
-  }
+  switch (interaction.commandName) {
+    case 'ping':
+      await interaction.reply('🏓 Pong! Bot is working perfectly! 🎉');
+      break;
 
-  if (interaction.commandName === 'predict') {
-    const predictions = [
-      "⚽ **Man United 2-1 Liverpool** (85% confidence)",
-      "⚽ **Arsenal 1-1 Chelsea** (78% confidence)", 
-      "⚽ **Man City 3-0 Tottenham** (92% confidence)",
-      "⚽ **Newcastle 2-0 Brighton** (80% confidence)"
-    ];
-    
-    await interaction.reply(`🎯 **Today's Predictions:**\n${predictions.join('\n')}`);
-  }
+    case 'predict':
+      await interaction.reply('🎯 Prediction feature coming soon!');
+      break;
 
-  if (interaction.commandName === 'matches') {
-    try {
-      const matches = await fetchMatches();
-      
-      if (matches && matches.length > 0) {
-        const matchList = matches.slice(0, 5).map(match => 
-          `⚽ ${match.teams.home.name} vs ${match.teams.away.name} - ${match.fixture.status.long}`
-        ).join('\n');
-        
-        await interaction.reply(`**🔴 Live Matches:**\n${matchList}`);
-      } else {
-        await interaction.reply('❌ No matches found at the moment.');
-      }
-    } catch (error) {
-      console.error('Match error:', error);
-      await interaction.reply('❌ Error fetching matches.');
-    }
-  }
+    case 'matches':
+      await interaction.reply('⚽ Live matches feature coming soon!');
+      break;
 
-  if (interaction.commandName === 'help') {
-    const helpMessage = `
+    case 'help':
+      await interaction.reply(`
 **🤖 FOOTBALL BOT COMMANDS:**
 
-\`/ping\` - Test if bot is working
-\`/predict\` - Get football match predictions  
-\`/matches\` - Get live football matches
+\`/ping\` - Test bot
+\`/predict\` - Get football predictions  
+\`/matches\` - Live football matches
 \`/help\` - Show this help message
 
-**✅ Bot is hosted on Railway.app**
-**🚀 No downtime, always online!**
-    `;
-    
-    await interaction.reply(helpMessage);
+**✅ Hosted on Railway**
+**🚀 Always online!**
+      `);
+      break;
   }
 });
 
-// Handle errors
-client.on('error', (error) => {
-  console.error('❌ Discord Client Error:', error);
-});
+// Error handling
+client.on('error', console.error);
+process.on('unhandledRejection', console.error);
 
-process.on('unhandledRejection', (error) => {
-  console.error('❌ Unhandled Promise Rejection:', error);
-});
-
-// Start the bot
-if (process.env.TOKEN) {
-  client.login(process.env.TOKEN)
-    .then(() => console.log('🔑 Login successful!'))
-    .catch(error => {
-      console.error('❌ Login failed:', error);
-      console.log('💡 Check if token is valid in Railway variables');
-    });
-} else {
-  console.log('❌ No token found in environment variables');
-  console.log('💡 Please set TOKEN in Railway environment variables');
-}
+// Login
+client.login(token)
+  .then(() => console.log('🔑 Login successful!'))
+  .catch(err => {
+    console.error('❌ Login failed:', err);
+    console.log('💡 Make sure TOKEN is correctly set in Railway environment variables.');
+  });
