@@ -1,11 +1,8 @@
+
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
 
-// Load environment variables (for local testing, optional if using Railway env vars)
-import dotenv from "dotenv";
-dotenv.config();
-
-// Check environment variables
-const token = process.env.TOKEN || process.env.DISCORD_TOKEN;
+// Read environment variables from Railway
+const token = process.env.TOKEN;
 const apiFootballKey = process.env.API_FOOTBALL;
 
 console.log('🚀 Starting Discord Bot...');
@@ -14,12 +11,8 @@ console.log('🔧 API Key available:', !!apiFootballKey);
 console.log('🔧 Token length:', token?.length);
 
 if (!token) {
-  console.error('❌ No TOKEN found in environment variables. Please set TOKEN in Railway or locally in .env');
+  console.error('❌ No TOKEN found in Railway environment variables.');
   process.exit(1);
-}
-
-if (!apiFootballKey) {
-  console.warn('⚠️ API_FOOTBALL key not found. Prediction or matches may not work.');
 }
 
 // Create Discord client
@@ -40,12 +33,10 @@ async function registerCommands() {
   try {
     console.log('📋 Registering slash commands...');
     const rest = new REST({ version: '10' }).setToken(token);
-
     await rest.put(
       Routes.applicationCommands(client.user?.id || '123456789012345678'),
       { body: commands }
     );
-
     console.log('✅ Slash commands registered!');
   } catch (err) {
     console.error('❌ Error registering commands:', err);
@@ -62,8 +53,6 @@ client.once('ready', async () => {
 // Handle slash commands
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-
-  console.log(`🎯 Command: /${interaction.commandName}`);
 
   switch (interaction.commandName) {
     case 'ping':
@@ -101,7 +90,4 @@ process.on('unhandledRejection', console.error);
 // Login
 client.login(token)
   .then(() => console.log('🔑 Login successful!'))
-  .catch(err => {
-    console.error('❌ Login failed:', err);
-    console.log('💡 Make sure TOKEN is correctly set in Railway environment variables.');
-  });
+  .catch(err => console.error('❌ Login failed:', err));
