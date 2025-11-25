@@ -10,10 +10,13 @@ console.log('🔧 Token available:', !!token);
 console.log('🔧 API Key available:', !!apiFootballKey);
 console.log('🔧 Token length:', token?.length);
 
+
 if (!token) {
-  console.error('❌ No TOKEN found in Railway environment variables.');
-  process.exit(1);
+    console.error('❌ No TOKEN found in Railway environment variables. Attempting login anyway...');
 }
+// The login call (client.login(token)) will handle the failure if token is null/undefined.
+
+
 
 // Create Discord client
 const client = new Client({
@@ -91,3 +94,4 @@ process.on('unhandledRejection', console.error);
 client.login(token)
   .then(() => console.log('🔑 Login successful!'))
   .catch(err => console.error('❌ Login failed:', err));
+
