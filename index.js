@@ -1,97 +1,114 @@
 
+
+
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
 
-// Read environment variables from Railway
-const token = process.env.TOKEN;
-const apiFootballKey = process.env.API_FOOTBALL;
+// 1. Get Environment Variables
+// We rely solely on Railway/process.env now
+const TOKEN = process.env.TOKEN;
+const API_FOOTBALL_KEY = process.env.API_FOOTBALL; // Using a clearer name for the API Key
 
-console.log('🚀 Starting Discord Bot...');
-console.log('🔧 Token available:', !!token);
-console.log('🔧 API Key available:', !!apiFootballKey);
-console.log('🔧 Token length:', token?.length);
+// 2. Initial Checks and Logging
+console.log('--- Bot Initialization ---');
+console.log('🔧 TOKEN available:', !!TOKEN);
+console.log('🔧 API_FOOTBALL_KEY available:', !!API_FOOTBALL_KEY);
 
-
-if (!token) {
-    console.error('❌ No TOKEN found in Railway environment variables. Attempting login anyway...');
+if (!TOKEN) {
+    console.error('❌ FATAL: Discord TOKEN is missing in environment variables.');
+    // We do NOT use process.exit(1) here. The client.login() failure will be logged below.
 }
-// The login call (client.login(token)) will handle the failure if token is null/undefined.
 
-
-
-// Create Discord client
+// 3. Setup Discord Client
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent]
+    intents: [GatewayIntentBits.Guilds] // Only Guilds intent needed for slash commands
 });
 
-// Define commands
+// Define Commands
 const commands = [
-  new SlashCommandBuilder().setName('ping').setDescription('Replies with Pong!'),
-  new SlashCommandBuilder().setName('predict').setDescription('Get football predictions'),
-  new SlashCommandBuilder().setName('help').setDescription('Show all commands'),
-  new SlashCommandBuilder().setName('matches').setDescription('Get live football matches')
+    new SlashCommandBuilder().setName('ping').setDescription('Replies with Pong!'),
+    new SlashCommandBuilder().setName('predict').setDescription('Get football predictions'),
+    new SlashCommandBuilder().setName('help').setDescription('Show all commands'),
+    new SlashCommandBuilder().setName('matches').setDescription('Get live football matches')
 ].map(cmd => cmd.toJSON());
 
-// Register slash commands
+// 4. Command Registration Function
 async function registerCommands() {
-  try {
-    console.log('📋 Registering slash commands...');
-    const rest = new REST({ version: '10' }).setToken(token);
-    await rest.put(
-      Routes.applicationCommands(client.user?.id || '123456789012345678'),
-      { body: commands }
-    );
-    console.log('✅ Slash commands registered!');
-  } catch (err) {
-    console.error('❌ Error registering commands:', err);
-  }
+    try {
+        console.log('📋 Registering slash commands...');
+        
+        // Ensure TOKEN is available before trying to set it
+        if (!TOKEN) {
+             console.error('❌ Cannot register commands: TOKEN is missing.');
+             return; 
+        }
+
+        const rest = new REST({ version: '10' }).setToken(TOKEN);
+        
+        // Note: You should replace the placeholder ID with your bot's actual ID 
+        // if client.user is null during deployment registration.
+        await rest.put(
+            Routes.applicationCommands(client.user?.id || 'YOUR_BOT_APPLICATION_ID'),
+            { body: commands }
+        );
+        
+        console.log('✅ Slash commands registered!');
+    } catch (error) {
+        console.error('❌ Error registering commands:', error.message);
+    }
 }
 
-// Ready event
+// 5. Bot Events
 client.once('ready', async () => {
-  console.log(`✅ ${client.user.tag} is online!`);
-  console.log(`🔗 Invite link: https://discord.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20applications.commands`);
-  await registerCommands();
+    console.log(`✅ ${client.user.tag} is online!`);
+    await registerCommands();
 });
 
 // Handle slash commands
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+    if (!interaction.isChatInputCommand()) return;
 
-  switch (interaction.commandName) {
-    case 'ping':
-      await interaction.reply('🏓 Pong! Bot is working perfectly! 🎉');
-      break;
+    console.log(`🎯 Command executed: /${interaction.commandName}`);
 
-    case 'predict':
-      await interaction.reply('🎯 Prediction feature coming soon!');
-      break;
+    switch (interaction.commandName) {
+        case 'ping':
+            await interaction.reply('🏓 Pong! Bot is working perfectly! 🎉');
+            break;
 
-    case 'matches':
-      await interaction.reply('⚽ Live matches feature coming soon!');
-      break;
+        case 'predict':
+            // Add your API integration logic here using API_FOOTBALL_KEY
+            await interaction.reply('🎯 Prediction feature coming soon!');
+            break;
 
-    case 'help':
-      await interaction.reply(`
+        case 'matches':
+            // Add your API integration logic here using API_FOOTBALL_KEY
+            await interaction.reply('⚽ Live matches feature coming soon!');
+            break;
+
+        case 'help':
+            const helpMessage = `
 **🤖 FOOTBALL BOT COMMANDS:**
 
-\`/ping\` - Test bot
-\`/predict\` - Get football predictions  
-\`/matches\` - Live football matches
+\`/ping\` - Test bot latency
+\`/predict\` - Get football match predictions
+\`/matches\` - Get live football matches
 \`/help\` - Show this help message
 
 **✅ Hosted on Railway**
-**🚀 Always online!**
-      `);
-      break;
-  }
+            `;
+            await interaction.reply({ content: helpMessage, ephemeral: true });
+            break;
+    }
 });
 
-// Error handling
+// 6. Login and Error Handling
+client.login(TOKEN)
+    .then(() => console.log('🔑 Attempting Discord Login...'))
+    .catch(err => {
+        console.error('❌ Login failed! Check TOKEN value and Bot intents:', err.message);
+        // This catch block handles the error if TOKEN is undefined or invalid.
+    });
+
 client.on('error', console.error);
-process.on('unhandledRejection', console.error);
-
-// Login
-client.login(token)
-  .then(() => console.log('🔑 Login successful!'))
-  .catch(err => console.error('❌ Login failed:', err));
-
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
