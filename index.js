@@ -1,574 +1,387 @@
-import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
-import dotenv from "dotenv";
-import axios from "axios";
-import cron from "node-cron";
+// index.js (ES module)
+import 'dotenv/config';
+import fetch from 'node-fetch';
+import moment from 'moment-timezone';
+import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
 
-dotenv.config();
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
-});
+/* ---------- CONFIG ---------- */
+const CHANNEL_ID = process.env.CHANNEL_ID; // channel where automatic messages will go
+const API_FOOTBALL_KEY = process.env.API_FOOTBALL;
+const ALL_SPORT_KEY = process.env.ALL_SPORT_API;
+const PK_TZ = 'Asia/Karachi';
 
-// API Configuration
-const API_CONFIG = {
-  websites: [
-    {
-      name: "API-Football",
-      url: "https://api-football-v1.p.rapidapi.com/v3/",
-      headers: {
-        'X-RapidAPI-Key': process.env.API_FOOTBALL_KEY,
-        'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com'
-      },
-      limits: { daily: 100, remaining: 100, resetTime: null }
-    },
-    {
-      name: "Football-Data",
-      url: "https://api.football-data.org/v4/",
-      headers: { 'X-Auth-Token': process.env.FOOTBALL_DATA_KEY },
-      limits: { daily: 50, remaining: 50, resetTime: null }
-    },
-    {
-      name: "TheSportsDB",
-      url: "https://www.thesportsdb.com/api/v1/json/",
-      key: process.env.SPORTS_DB_KEY,
-      limits: { daily: 1000, remaining: 1000, resetTime: null }
-    },
-    {
-      name: "ApiSports",
-      url: "https://v3.football.api-sports.io/",
-      headers: {
-        'x-rapidapi-key': process.env.API_SPORTS_KEY,
-        'x-rapidapi-host': 'v3.football.api-sports.io'
-      },
-      limits: { daily: 100, remaining: 100, resetTime: null }
-    },
-    {
-      name: "OddsAPI",
-      url: "https://api.the-odds-api.com/v4/",
-      key: process.env.ODDS_API_KEY,
-      limits: { daily: 500, remaining: 500, resetTime: null }
-    }
-  ]
+// Top 8 leagues (use league IDs or slugs matching your API — adjust if needed)
+const TOP_LEAGUES = [
+  // fill with league IDs or slugs your API expects; these are placeholders you can adapt
+  { name: 'Premier League', id: 39 },
+  { name: 'La Liga', id: 140 },
+  { name: 'Serie A', id: 135 },
+  { name: 'Bundesliga', id: 78 },
+  { name: 'Ligue 1', id: 61 },
+  { name: 'Eredivisie', id: 88 },
+  { name: 'Primeira Liga', id: 94 },
+  { name: 'MLS', id: 253 }
+];
+
+// WC Qualifiers indicator (we will request competitions by name or code)
+const WC_QUALIFIERS = { season: moment().year(), nameContains: 'World Cup' };
+
+/* ---------- state for API hits / throttling ---------- */
+const apiStats = {
+  apiFootball: { calls: 0, lastReset: Date.now() },
+  allSport: { calls: 0, lastReset: Date.now() }
 };
-
-// Pakistan Time Zone
-const PAKISTAN_TIMEZONE = 'Asia/Karachi';
-
-class FootballPredictionBot {
-  constructor() {
-    this.matchCache = new Map();
-    this.lastUpdate = null;
+function incApi(apiName) {
+  const stat = apiStats[apiName];
+  if (!stat) return;
+  stat.calls++;
+  // reset daily
+  if (Date.now() - stat.lastReset > 24 * 3600 * 1000) {
+    stat.calls = 1;
+    stat.lastReset = Date.now();
   }
+}
 
-  // Convert to Pakistan Time
-  getPakistanTime() {
-    return new Date().toLocaleString("en-US", { timeZone: PAKISTAN_TIMEZONE });
+/* ---------- Utilities: Poisson & probability ---------- */
+function factorial(n) { if (n < 2) return 1; let r = 1; for (let i = 2; i <= n; i++) r *= i; return r; }
+function poissonProb(k, lambda) { return Math.pow(lambda, k) * Math.exp(-lambda) / factorial(k); }
+
+// probability total goals > threshold (threshold may be 0.5, 1.5 etc)
+// we compute convolution of two independent Poisson (home and away) -> total is Poisson(lambda=λh+λa)
+function probOver(threshold, lambdaTotal) {
+  // threshold like 0.5 means Over 0.5 => P(total >= 1)
+  const minGoals = Math.floor(threshold + 0.0001) + 1; // e.g. 0.5 -> 1, 1.5 -> 2
+  let p = 0;
+  for (let k = minGoals; k <= Math.max(20, minGoals + 10); k++) { // cap loop
+    p += poissonProb(k, lambdaTotal);
   }
+  return p;
+}
 
-  // API Rate Limit Management
-  async makeAPIRequest(apiConfig, endpoint) {
-    const api = apiConfig;
-    if (api.limits.remaining <= 0) {
-      throw new Error(`API limit exceeded for ${api.name}`);
+// BTTS = 1 - (P(home scores 0) + P(away scores 0) - P(both score 0))
+// But simpler: P(home>0 and away>0) = 1 - P(home==0) - P(away==0) + P(both==0)
+function probBTTS(lambdaHome, lambdaAway) {
+  const pHome0 = poissonProb(0, lambdaHome);
+  const pAway0 = poissonProb(0, lambdaAway);
+  const pBoth0 = pHome0 * pAway0;
+  return 1 - pHome0 - pAway0 + pBoth0;
+}
+
+/* ---------- Helpers: API fetchers ---------- */
+// NOTE: these use the most common API endpoints. If your chosen APIs use different paths, replace as needed.
+
+// 1) API-Football (api-sports) — fetch fixtures for today and recent team stats
+async function fetchFromApiFootball(dateISO) {
+  if (!API_FOOTBALL_KEY) return [];
+  try {
+    const url = `https://v3.football.api-sports.io/fixtures?date=${dateISO}`;
+    const res = await fetch(url, {
+      headers: { 'x-apisports-key': API_FOOTBALL_KEY }
+    });
+    incApi('apiFootball');
+    const json = await res.json();
+    if (!json || !json.response) return [];
+    // Normalize: extract fixtures
+    return json.response.map(f => ({
+      id: `af-${f.fixture.id}`,
+      source: 'api-football',
+      league: f.league?.name || f.league?.id,
+      leagueId: f.league?.id,
+      home: f.teams.home.name,
+      away: f.teams.away.name,
+      kickoffUTC: f.fixture.date,
+      status: f.fixture.status?.short || f.fixture.status?.long,
+      // some useful fields if present:
+      goalsHome: f.goals?.home,
+      goalsAway: f.goals?.away,
+      // attach raw object for later deeper stats queries
+      raw: f
+    }));
+  } catch (err) {
+    console.error('API-Football fetch error', err);
+    return [];
+  }
+}
+
+// 2) All-Sport-API (example) — you must plug the real endpoint/params you plan to use
+async function fetchFromAllSportAPI(dateISO) {
+  if (!ALL_SPORT_KEY) return [];
+  try {
+    // Placeholder endpoint — most "all-sport" APIs will have a fixtures endpoint filtered by date
+    const url = `https://api.all-sports.xyz/fixtures?date=${dateISO}&apikey=${ALL_SPORT_KEY}`;
+    const res = await fetch(url);
+    incApi('allSport');
+    const json = await res.json();
+    if (!json || !json.result) return [];
+    // Normalize according to common schema
+    return json.result.map(f => ({
+      id: `as-${f.fixture_id || f.id}`,
+      source: 'all-sport',
+      league: f.league?.name || f.competition,
+      leagueId: f.league?.id || f.league?.league_id,
+      home: f.home?.name || f.home_team,
+      away: f.away?.name || f.away_team,
+      kickoffUTC: f.event_time || f.fixture_date || f.kickoff_utc,
+      status: f.status || 'NS',
+      goalsHome: f.home?.goals ?? f.goals_home,
+      goalsAway: f.away?.goals ?? f.goals_away,
+      raw: f
+    }));
+  } catch (err) {
+    console.error('All-Sport API fetch error', err);
+    return [];
+  }
+}
+
+/* ---------- Helper: dedupe and filter top leagues + WC qualifiers ---------- */
+function mergeAndFilterMatches(listA, listB) {
+  const all = [...listA, ...listB];
+  const map = new Map();
+  for (const m of all) {
+    const key = (m.home + '|' + m.away + '|' + (m.kickoffUTC || '')).toLowerCase();
+    if (!map.has(key)) map.set(key, m);
+  }
+  // Filter top leagues + WC qualifiers: if leagueId matches TOP_LEAGUES or league name contains "World Cup" or qualifiers
+  const filtered = [];
+  for (const m of map.values()) {
+    const leagueMatch = TOP_LEAGUES.some(l => String(m.leagueId) === String(l.id) || (m.league && m.league.includes(l.name)));
+    const isWCQual = m.league && /(World Cup|WC Qualifier|Qualifier|FIFA)/i.test(m.league);
+    if (leagueMatch || isWCQual) filtered.push(m);
+  }
+  return filtered;
+}
+
+/* ---------- Helper: estimate expected goals from recent data (heuristic) ---------- */
+/*
+  Strategy:
+  - Prefer API-provided xG or expected goals if available (api-football sometimes includes team stats).
+  - Otherwise compute from recent goals average (last N fixtures). We'll try to fetch last 6 fixtures for each team if API supports it (via raw data).
+  - Fallback: league average total goals (~2.6) split 50/50.
+*/
+async function estimateExpectedGoals(match) {
+  // If api-football raw provides stats like 'xG' or 'expected_goals', use it
+  try {
+    // 1) If API-Football raw contains team statistics or predicted values, use them
+    const raw = match.raw;
+    if (raw && raw.teams && raw.goals && typeof raw.goals.home === 'number') {
+      // quick fallback: use last match goals as base (not perfect)
+      const homeRecent = raw.teams.home;
+      const awayRecent = raw.teams.away;
     }
 
-    try {
-      let response;
-      if (api.name === "TheSportsDB") {
-        response = await axios.get(`${api.url}${api.key}${endpoint}`);
-      } else if (api.name === "OddsAPI") {
-        response = await axios.get(`${api.url}${endpoint}?apiKey=${api.key}`);
-      } else {
-        response = await axios.get(`${api.url}${endpoint}`, { headers: api.headers });
-      }
-
-      // Update rate limits from headers if available
-      if (response.headers['x-ratelimit-requests-remaining']) {
-        api.limits.remaining = parseInt(response.headers['x-ratelimit-requests-remaining']);
-      } else {
-        api.limits.remaining--;
-      }
-
-      return response.data;
-    } catch (error) {
-      console.error(`API Error (${api.name}):`, error.message);
-      api.limits.remaining--;
-      throw error;
-    }
-  }
-
-  // Get Today's Matches
-  async getTodaysMatches() {
-    const today = new Date().toISOString().split('T')[0];
-    const matches = [];
-
-    for (const api of API_CONFIG.websites) {
+    // 2) Try to compute from recent fixtures if available in raw.league or raw.teams -- these APIs vary greatly.
+    // We'll attempt to query API-Football for last 6 fixtures if match.raw has fixture/team ids
+    if (match.raw && match.raw.teams && match.raw.teams.home?.id) {
+      // attempt to fetch last results for home and away from API-Football
       try {
-        let data;
-        switch (api.name) {
-          case "API-Football":
-            data = await this.makeAPIRequest(api, `fixtures?date=${today}&timezone=${PAKISTAN_TIMEZONE}`);
-            if (data.response) {
-              matches.push(...data.response.map(match => ({
-                id: match.fixture.id,
-                home: match.teams.home.name,
-                away: match.teams.away.name,
-                league: match.league.name,
-                time: match.fixture.date,
-                status: match.fixture.status.short
-              })));
-            }
-            break;
+        const homeId = match.raw.teams.home.id;
+        const awayId = match.raw.teams.away.id;
+        const resH = await fetch(`https://v3.football.api-sports.io/fixtures?team=${homeId}&last=6`, {
+          headers: { 'x-apisports-key': API_FOOTBALL_KEY }
+        });
+        incApi('apiFootball');
+        const jsonH = await resH.json();
+        const homeGoals = (jsonH.response || []).map(r => r.goals.home).filter(g => g !== null && g !== undefined);
+        const avgHome = homeGoals.length ? homeGoals.reduce((a,b)=>a+b,0)/homeGoals.length : 1.2;
 
-          case "Football-Data":
-            data = await this.makeAPIRequest(api, `matches?dateFrom=${today}&dateTo=${today}`);
-            if (data.matches) {
-              matches.push(...data.matches.map(match => ({
-                id: match.id,
-                home: match.homeTeam.name,
-                away: match.awayTeam.name,
-                league: match.competition.name,
-                time: match.utcDate,
-                status: match.status
-              })));
-            }
-            break;
-        }
-      } catch (error) {
-        console.log(`Skipping ${api.name}: ${error.message}`);
+        const resA = await fetch(`https://v3.football.api-sports.io/fixtures?team=${awayId}&last=6`, {
+          headers: { 'x-apisports-key': API_FOOTBALL_KEY }
+        });
+        incApi('apiFootball');
+        const jsonA = await resA.json();
+        const awayGoals = (jsonA.response || []).map(r => r.goals.away).filter(g => g !== null && g !== undefined);
+        const avgAway = awayGoals.length ? awayGoals.reduce((a,b)=>a+b,0)/awayGoals.length : 1.0;
+
+        // small adjustment based on home advantage
+        const lambdaHome = Math.max(0.1, avgHome * 1.05);
+        const lambdaAway = Math.max(0.05, avgAway * 0.95);
+        return { lambdaHome, lambdaAway };
+      } catch (err) {
+        // fallback below
       }
     }
-
-    // Remove duplicates
-    return matches.filter((match, index, self) =>
-      index === self.findIndex(m => m.home === match.home && m.away === match.away)
-    );
+  } catch (err) {
+    // ignore and fallback
   }
 
-  // Advanced AI Prediction Algorithm
-  async generatePredictions(matches) {
-    const predictions = [];
+  // Fallback: use league average split
+  const leagueAvgTotal = 2.6; // typical average total goals
+  return { lambdaHome: leagueAvgTotal/2, lambdaAway: leagueAvgTotal/2 };
+}
 
+/* ---------- Prediction calc for a single match ---------- */
+async function analyzeMatch(match) {
+  // estimate expected goals per team (λ_home, λ_away)
+  const { lambdaHome, lambdaAway } = await estimateExpectedGoals(match);
+  const lambdaTotal = lambdaHome + lambdaAway;
+
+  // compute over/under probabilities for thresholds 0.5..5.5 (step 0.5)
+  const thresholds = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5];
+  const markets = thresholds.map(th => {
+    const pOver = probOver(th, lambdaTotal);
+    return { threshold: th, pOver, pUnder: 1 - pOver };
+  });
+
+  // compute Win/Draw/Loss probabilities approximated from Poisson
+  // P(home score = i) and P(away score = j) => nested sum
+  const maxGoalsCalc = 8;
+  const homeDist = Array.from({length: maxGoalsCalc+1}, (_,k)=>poissonProb(k, lambdaHome));
+  const awayDist = Array.from({length: maxGoalsCalc+1}, (_,k)=>poissonProb(k, lambdaAway));
+  let pHomeWin = 0, pDraw = 0, pAwayWin = 0;
+  for (let i=0;i<=maxGoalsCalc;i++){
+    for (let j=0;j<=maxGoalsCalc;j++){
+      const prob = homeDist[i]*awayDist[j];
+      if (i>j) pHomeWin += prob;
+      else if (i===j) pDraw += prob;
+      else pAwayWin += prob;
+    }
+  }
+
+  // BTTS probability
+  const pBTTS = probBTTS(lambdaHome, lambdaAway);
+
+  // Last 10 minutes heuristic:
+  // - If expected total goals > 0.8 and match close, small boost. This is a rough heuristic:
+  // We'll estimate last-10-min probability as proportional to lambdaTotal * 10/90 but boosted if high tempo.
+  const last10Prob = Math.min(0.6, Math.max(0.02, (lambdaTotal * (10/90)) * (1 + Math.abs(lambdaHome - lambdaAway)/Math.max(0.1, lambdaTotal))));
+
+  // Determine which team likely to score in last 10 (simple: higher λ)
+  const last10Likely = lambdaHome > lambdaAway ? match.home : (lambdaAway > lambdaHome ? match.away : 'Either');
+
+  // Choose markets with >=85% confidence (either Over OR Under)
+  const strongMarkets = markets
+    .map(m => {
+      const which = m.pOver >= 0.85 ? { side: `Over ${m.threshold}`, prob: m.pOver } : (m.pUnder >= 0.85 ? { side: `Under ${m.threshold}`, prob: m.pUnder } : null);
+      return which ? { threshold: m.threshold, ...which } : null;
+    })
+    .filter(x => x);
+
+  return {
+    match: `${match.home} vs ${match.away}`,
+    kickoffPKT: match.kickoffUTC ? moment(match.kickoffUTC).tz(PK_TZ).format('YYYY-MM-DD HH:mm') : 'TBD',
+    lambdaHome, lambdaAway, lambdaTotal,
+    winProb: { home: pHomeWin, draw: pDraw, away: pAwayWin },
+    bttsProb: pBTTS,
+    last10Prob, last10Likely,
+    strongMarkets
+  };
+}
+
+/* ---------- Main flow: fetch, analyze and send ---------- */
+async function fetchAnalyzeAndSend() {
+  try {
+    console.log('--- Fetching matches (APIs) @', new Date().toISOString());
+    const dateISO = moment().format('YYYY-MM-DD');
+
+    // 1) fetch
+    const [a, b] = await Promise.all([ fetchFromApiFootball(dateISO), fetchFromAllSportAPI(dateISO) ]);
+    console.log('Fetched', a.length, 'from api-football and', b.length, 'from all-sport');
+
+    // 2) merge & filter
+    const matches = mergeAndFilterMatches(a, b);
+    console.log('Filtered matches count (top leagues + WC qualifiers):', matches.length);
+    if (!matches.length) {
+      console.log('No matches found for top leagues / WC qualifiers today.');
+      return;
+    }
+
+    // 3) analyze all matches (concurrently with limit)
+    const analysis = [];
     for (const match of matches) {
       try {
-        const analysis = await this.analyzeMatch(match);
-        
-        if (analysis.confidence >= 85) {
-          predictions.push({
-            match: `${match.home} vs ${match.away}`,
-            prediction: analysis.prediction,
-            confidence: analysis.confidence,
-            market: analysis.bestMarket,
-            btts: analysis.btts,
-            lateGoal: analysis.lateGoal,
-            stats: analysis.stats
-          });
-        }
-      } catch (error) {
-        console.error(`Analysis error for ${match.home} vs ${match.away}:`, error);
+        const result = await analyzeMatch(match);
+        analysis.push({ match, result });
+      } catch (err) {
+        console.error('Error analyzing match', match, err);
       }
     }
 
-    return predictions;
-  }
+    // 4) prepare message: only include matches which have at least one strong market >=85%
+    const messages = [];
+    for (const aRes of analysis) {
+      const r = aRes.result;
+      if (r.strongMarkets && r.strongMarkets.length) {
+        const marketsText = r.strongMarkets.map(m => `• ${m.side} — ${(m.prob*100).toFixed(1)}%`).join('\n');
+        const winText = `WinProb H/D/A: ${(r.winProb.home*100).toFixed(1)}% / ${(r.winProb.draw*100).toFixed(1)}% / ${(r.winProb.away*100).toFixed(1)}%`;
+        const msg = `⚽ **${aRes.match}** (${r.kickoffPKT} PKT)\n${marketsText}\nBTTS: ${(r.bttsProb*100).toFixed(1)}%\nLast 10-min goal: ${(r.last10Prob*100).toFixed(1)}% (likely: ${r.last10Likely})\n${winText}`;
+        messages.push(msg);
+      }
+    }
 
-  // Comprehensive Match Analysis
-  async analyzeMatch(match) {
-    // Get match statistics from multiple APIs
-    const stats = await this.getMatchStatistics(match);
-    const odds = await this.getMatchOdds(match);
-    
-    // AI Prediction Logic
-    const analysis = {
-      prediction: this.calculateWinner(stats),
-      confidence: this.calculateConfidence(stats, odds),
-      bestMarket: this.findBestMarket(stats, odds),
-      btts: this.calculateBTTS(stats),
-      lateGoal: this.predictLateGoal(stats),
-      stats: stats
-    };
-
-    return analysis;
-  }
-
-  // Calculate Winner with AI Logic
-  calculateWinner(stats) {
-    const {
-      homeAttack, awayAttack, homeDefense, awayDefense,
-      homeForm, awayForm, h2h, homeAdvantage
-    } = stats;
-
-    const homeStrength = (homeAttack * 0.3) + (awayDefense * 0.2) + (homeForm * 0.25) + (h2h * 0.15) + (homeAdvantage * 0.1);
-    const awayStrength = (awayAttack * 0.3) + (homeDefense * 0.2) + (awayForm * 0.25) + ((1 - h2h) * 0.15);
-
-    if (Math.abs(homeStrength - awayStrength) < 0.1) {
-      return "Draw";
-    } else if (homeStrength > awayStrength) {
-      return `Home Win (${stats.homeTeam})`;
+    // 5) send to Discord channel
+    if (messages.length) {
+      const channel = await client.channels.fetch(CHANNEL_ID);
+      if (channel && channel.isTextBased && channel.isTextBased()) {
+        // Discord message length control
+        const payload = `🎯 **High-confidence markets (≥85%) — Updated ${moment().tz(PK_TZ).format('YYYY-MM-DD HH:mm')} PKT**\n\n` + messages.join('\n\n---\n\n');
+        await channel.send(payload);
+        console.log('Sent', messages.length, 'match messages to Discord.');
+      } else {
+        console.warn('Channel not found or not text-based.');
+      }
     } else {
-      return `Away Win (${stats.awayTeam})`;
+      console.log('No 85%+ markets found at this time.');
     }
-  }
 
-  // Calculate Confidence Percentage
-  calculateConfidence(stats, odds) {
-    let confidence = 50; // Base confidence
-
-    // Form factor (20%)
-    confidence += (stats.homeForm - stats.awayForm) * 20;
-
-    // Attack/Defense ratio (25%)
-    const attackDiff = (stats.homeAttack - stats.awayAttack) * 12.5;
-    const defenseDiff = (stats.awayDefense - stats.homeDefense) * 12.5;
-    confidence += attackDiff + defenseDiff;
-
-    // H2H factor (15%)
-    confidence += (stats.h2h - 0.5) * 30;
-
-    // Home advantage (10%)
-    confidence += stats.homeAdvantage * 10;
-
-    // Odds consistency (20%)
-    const oddsConsistency = this.calculateOddsConsistency(odds);
-    confidence += oddsConsistency * 20;
-
-    return Math.min(Math.max(Math.round(confidence), 0), 95);
-  }
-
-  // Find Best Market (0.5 - 5.5 Over/Under)
-  findBestMarket(stats, odds) {
-    const markets = ['Over 0.5', 'Under 0.5', 'Over 1.5', 'Under 1.5', 
-                    'Over 2.5', 'Under 2.5', 'Over 3.5', 'Under 3.5',
-                    'Over 4.5', 'Under 4.5', 'Over 5.5', 'Under 5.5'];
-
-    let bestMarket = '';
-    let highestConfidence = 0;
-
-    markets.forEach(market => {
-      const confidence = this.analyzeMarket(market, stats, odds);
-      if (confidence > highestConfidence && confidence >= 85) {
-        highestConfidence = confidence;
-        bestMarket = market;
-      }
-    });
-
-    return bestMarket || 'No high-confidence market found';
-  }
-
-  // Analyze Specific Market
-  analyzeMarket(market, stats, odds) {
-    const [type, line] = market.split(' ');
-    const lineValue = parseFloat(line);
-
-    // Complex market analysis based on team statistics
-    const avgGoals = (stats.homeAttack + stats.awayAttack) / 2;
-    const goalProbability = this.calculateGoalProbability(avgGoals, lineValue);
-
-    return Math.round(goalProbability * 100);
-  }
-
-  // Calculate BTTS Probability
-  calculateBTTS(stats) {
-    const homeScoringProb = stats.homeAttack * 0.7;
-    const awayScoringProb = stats.awayAttack * 0.7;
-    const bttsProbability = homeScoringProb * awayScoringProb * 100;
-
-    return {
-      probability: Math.round(bttsProbability),
-      likely: bttsProbability >= 60
-    };
-  }
-
-  // Predict Late Goal (Last 10 minutes)
-  predictLateGoal(stats) {
-    const lateGoalProbability = (stats.homeAttack * 0.3 + stats.awayAttack * 0.3) * 100;
-    
-    return {
-      probability: Math.round(lateGoalProbability),
-      likelyTeam: stats.homeAttack > stats.awayAttack ? stats.homeTeam : stats.awayTeam,
-      timeframe: '75-90 minutes'
-    };
-  }
-
-  // Get Match Statistics from APIs
-  async getMatchStatistics(match) {
-    // Simulated data - Replace with actual API calls
-    return {
-      homeTeam: match.home,
-      awayTeam: match.away,
-      homeAttack: Math.random() * 0.8 + 0.2, // 0.2-1.0
-      awayAttack: Math.random() * 0.8 + 0.2,
-      homeDefense: Math.random() * 0.8 + 0.2,
-      awayDefense: Math.random() * 0.8 + 0.2,
-      homeForm: Math.random() * 0.8 + 0.2,
-      awayForm: Math.random() * 0.8 + 0.2,
-      h2h: Math.random(), // Head-to-head advantage
-      homeAdvantage: 0.6, // Home advantage factor
-      corners: {
-        home: Math.floor(Math.random() * 10),
-        away: Math.floor(Math.random() * 10)
-      },
-      attacks: {
-        home: Math.floor(Math.random() * 20),
-        away: Math.floor(Math.random() * 20)
-      },
-      penalties: {
-        home: Math.floor(Math.random() * 3),
-        away: Math.floor(Math.random() * 3)
-      }
-    };
-  }
-
-  // Get Match Odds
-  async getMatchOdds(match) {
-    // Simulated odds data
-    return {
-      homeWin: 2.0 + Math.random(),
-      draw: 3.0 + Math.random(),
-      awayWin: 3.0 + Math.random(),
-      overUnder: {
-        '0.5': { over: 1.1, under: 6.0 },
-        '1.5': { over: 1.3, under: 3.0 },
-        '2.5': { over: 1.8, under: 1.9 },
-        '3.5': { over: 2.5, under: 1.5 },
-        '4.5': { over: 3.5, under: 1.3 },
-        '5.5': { over: 5.0, under: 1.1 }
-      }
-    };
-  }
-
-  // Calculate Odds Consistency
-  calculateOddsConsistency(odds) {
-    const impliedProbabilities = [
-      1 / odds.homeWin,
-      1 / odds.draw,
-      1 / odds.awayWin
-    ];
-    
-    const totalProbability = impliedProbabilities.reduce((sum, prob) => sum + prob, 0);
-    const margin = totalProbability - 1;
-    
-    return Math.max(0, 1 - margin * 2); // Higher consistency = lower margin
-  }
-
-  // Calculate Goal Probability
-  calculateGoalProbability(avgGoals, line) {
-    // Poisson distribution approximation
-    const lambda = avgGoals;
-    let probability = 0;
-    
-    if (line.includes('Over')) {
-      for (let i = Math.ceil(lineValue); i <= 10; i++) {
-        probability += (Math.exp(-lambda) * Math.pow(lambda, i)) / this.factorial(i);
-      }
-    } else { // Under
-      for (let i = 0; i < lineValue; i++) {
-        probability += (Math.exp(-lambda) * Math.pow(lambda, i)) / this.factorial(i);
-      }
-    }
-    
-    return probability;
-  }
-
-  factorial(n) {
-    return n <= 1 ? 1 : n * this.factorial(n - 1);
-  }
-
-  // Get API Status
-  getAPIStatus() {
-    return API_CONFIG.websites.map(api => ({
-      name: api.name,
-      remaining: api.limits.remaining,
-      daily: api.limits.daily,
-      usage: `${(((api.limits.daily - api.limits.remaining) / api.limits.daily) * 100).toFixed(1)}%`
-    }));
+    // 6) log API stats
+    console.log('API call counters:', JSON.stringify(apiStats));
+  } catch (err) {
+    console.error('Error in fetchAnalyzeAndSend:', err);
   }
 }
 
-// Initialize bot
-const predictionBot = new FootballPredictionBot();
+/* ---------- Scheduling every 5-7 minutes with random jitter ---------- */
+let schedulerActive = false;
+async function scheduleLoop() {
+  if (schedulerActive) return;
+  schedulerActive = true;
+  async function loop() {
+    await fetchAnalyzeAndSend();
+    // next run between 5 and 7 minutes
+    const nextMs = (5 * 60 * 1000) + Math.floor(Math.random() * (2 * 60 * 1000)); // 300k to 420k
+    console.log(`Next fetch in ${(nextMs/60000).toFixed(2)} minutes`);
+    setTimeout(loop, nextMs);
+  }
+  loop();
+}
 
-// Slash Commands
+/* ---------- Slash commands registration (small) ---------- */
 const commands = [
-  new SlashCommandBuilder()
-    .setName('ping')
-    .setDescription('Replies with Pong!'),
-  new SlashCommandBuilder()
-    .setName('predict')
-    .setDescription('Get today\'s football predictions with AI analysis'),
-  new SlashCommandBuilder()
-    .setName('help')
-    .setDescription('Show all commands'),
-  new SlashCommandBuilder()
-    .setName('status')
-    .setDescription('Check API status and limits'),
-  new SlashCommandBuilder()
-    .setName('matches')
-    .setDescription('Show today\'s matches')
-].map(command => command.toJSON());
+  new SlashCommandBuilder().setName('ping').setDescription('Replies with Pong!'),
+  new SlashCommandBuilder().setName('predict').setDescription('Get current predictions now'),
+  new SlashCommandBuilder().setName('help').setDescription('Show help')
+].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-
-// Register slash commands
 async function registerCommands() {
   try {
-    console.log('📋 Registering slash commands...');
-    await rest.put(
-      Routes.applicationCommands(process.env.CLIENT_ID),
-      { body: commands }
-    );
-    console.log('✅ Slash commands registered!');
-  } catch (error) {
-    console.error('❌ Error registering commands:', error);
+    await rest.put(Routes.applicationCommands(client.user?.id || 'your_bot_id_here'), { body: commands });
+    console.log('Slash commands registered.');
+  } catch (err) {
+    console.error('Failed to register commands', err);
   }
 }
 
-// Auto-update predictions every 5 minutes
-function startAutoUpdates() {
-  cron.schedule('*/5 * * * *', async () => {
-    console.log('🔄 Auto-updating predictions...');
-    try {
-      const matches = await predictionBot.getTodaysMatches();
-      const predictions = await predictionBot.generatePredictions(matches);
-      
-      predictionBot.matchCache.set('predictions', predictions);
-      predictionBot.lastUpdate = new Date();
-      
-      console.log(`✅ Updated ${predictions.length} predictions at ${predictionBot.getPakistanTime()}`);
-    } catch (error) {
-      console.error('❌ Auto-update failed:', error);
-    }
-  });
-}
-
-client.once('ready', async () => {
-  console.log(`✅ ${client.user.tag} is online!`);
-  console.log(`🕒 Pakistan Time: ${predictionBot.getPakistanTime()}`);
-  
-  await registerCommands();
-  startAutoUpdates();
-  
-  // Initial data load
-  const matches = await predictionBot.getTodaysMatches();
-  const predictions = await predictionBot.generatePredictions(matches);
-  predictionBot.matchCache.set('predictions', predictions);
-  predictionBot.lastUpdate = new Date();
-});
-
-// Handle slash commands
+/* ---------- Interaction handling ---------- */
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-
-  console.log(`🎯 Command: /${interaction.commandName}`);
-
-  if (interaction.commandName === 'ping') {
-    await interaction.reply('🏓 Pong! Bot is working perfectly! 🎉');
-  }
-
+  if (interaction.commandName === 'ping') return interaction.reply('🏓 Pong!');
+  if (interaction.commandName === 'help') return interaction.reply('`/predict` to fetch live high-confidence markets now.');
   if (interaction.commandName === 'predict') {
-    await interaction.deferReply();
-    
-    try {
-      const predictions = predictionBot.matchCache.get('predictions') || [];
-      
-      if (predictions.length === 0) {
-        await interaction.editReply('❌ No high-confidence predictions available right now. Check back later.');
-        return;
-      }
-
-      let response = `⚽ **AI FOOTBALL PREDICTIONS** ⚽\n`;
-      response += `📅 Last Updated: ${predictionBot.lastUpdate.toLocaleString()}\n`;
-      response += `🕒 Pakistan Time: ${predictionBot.getPakistanTime()}\n\n`;
-      
-      predictions.forEach((pred, index) => {
-        response += `**${index + 1}. ${pred.match}**\n`;
-        response += `   🎯 Prediction: ${pred.prediction}\n`;
-        response += `   ✅ Confidence: ${pred.confidence}%\n`;
-        response += `   📊 Best Market: ${pred.market}\n`;
-        response += `   ⚽ BTTS: ${pred.btts.likely ? 'Yes' : 'No'} (${pred.btts.probability}%)\n`;
-        response += `   ⏰ Late Goal: ${pred.lateGoal.likely ? `${pred.lateGoal.likelyTeam} (${pred.lateGoal.probability}%)` : 'Unlikely'}\n\n`;
-      });
-
-      await interaction.editReply(response);
-    } catch (error) {
-      await interaction.editReply('❌ Error generating predictions. Please try again later.');
-      console.error('Prediction error:', error);
-    }
-  }
-
-  if (interaction.commandName === 'status') {
-    const apiStatus = predictionBot.getAPIStatus();
-    
-    let response = `**🔧 API STATUS & LIMITS**\n\n`;
-    apiStatus.forEach(api => {
-      response += `**${api.name}:**\n`;
-      response += `   📊 Remaining: ${api.remaining}/${api.daily}\n`;
-      response += `   📈 Usage: ${api.usage}\n\n`;
-    });
-
-    response += `🕒 Last Update: ${predictionBot.lastUpdate ? predictionBot.lastUpdate.toLocaleString() : 'Never'}`;
-    
-    await interaction.reply(response);
-  }
-
-  if (interaction.commandName === 'matches') {
-    await interaction.deferReply();
-    
-    try {
-      const matches = await predictionBot.getTodaysMatches();
-      
-      if (matches.length === 0) {
-        await interaction.editReply('❌ No matches found for today.');
-        return;
-      }
-
-      let response = `📅 **TODAY'S MATCHES**\n`;
-      response += `🕒 Pakistan Time: ${predictionBot.getPakistanTime()}\n\n`;
-      
-      matches.forEach((match, index) => {
-        const matchTime = new Date(match.time).toLocaleTimeString('en-US', { 
-          timeZone: PAKISTAN_TIMEZONE,
-          hour: '2-digit',
-          minute: '2-digit'
-        });
-        
-        response += `**${index + 1}. ${match.home} vs ${match.away}**\n`;
-        response += `   🏆 ${match.league}\n`;
-        response += `   ⏰ ${matchTime}\n`;
-        response += `   📊 ${match.status}\n\n`;
-      });
-
-      await interaction.editReply(response);
-    } catch (error) {
-      await interaction.editReply('❌ Error fetching matches. Please try again later.');
-    }
-  }
-
-  if (interaction.commandName === 'help') {
-    const helpMessage = `
-**🤖 AI FOOTBALL PREDICTION BOT - COMMANDS**
-
-\`/ping\` - Test bot responsiveness
-\`/predict\` - Get AI-powered football predictions (85%+ confidence)
-\`/matches\` - Show today's matches
-\`/status\` - Check API limits and bot status
-\`/help\` - Show this message
-
-**🔍 FEATURES:**
-✅ 85%+ Confidence AI Predictions
-✅ Over/Under Market Analysis (0.5-5.5)
-✅ BTTS (Both Teams to Score) Prediction
-✅ Late Goal Analysis (75-90 mins)
-✅ Real-time Statistics & Odds
-✅ Pakistan Time Zone
-✅ Auto-updates every 5 minutes
-✅ Multiple API Integration
-
-**⚡ No message permissions needed!** 🚀
-    `;
-    
-    await interaction.reply(helpMessage);
+    await interaction.deferReply({ ephemeral: false });
+    await fetchAnalyzeAndSend();
+    return interaction.editReply('✅ Prediction update posted to channel (and logs).');
   }
 });
 
+/* ---------- Client ready ---------- */
+client.once('ready', async () => {
+  console.log(`${client.user.tag} ready — starting scheduler.`);
+  await registerCommands();
+  scheduleLoop();
+});
+
+/* ---------- Login ---------- */
 client.login(process.env.TOKEN);
