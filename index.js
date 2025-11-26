@@ -1,7 +1,3 @@
-
-
-
-
 import 'dotenv/config'; // automatically loads .env
 import { Client, GatewayIntentBits } from 'discord.js';
 
