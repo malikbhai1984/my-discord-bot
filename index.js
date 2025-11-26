@@ -1,15 +1,15 @@
-import 'dotenv/config'; // for local testing only
+import 'dotenv/config'; // automatically loads .env locally
 import { Client, GatewayIntentBits } from 'discord.js';
 
 console.log("🚀 Starting bot debug check...");
 
-// 1️⃣ Check if environment variables are loaded
+// 1️⃣ Check environment variables
 console.log("Checking environment variables...");
 console.log("process.env.TOKEN:", process.env.TOKEN ? "[FOUND]" : "[NOT FOUND]");
 console.log("process.env.API_FOOTBALL:", process.env.API_FOOTBALL ? "[FOUND]" : "[NOT FOUND]");
 console.log("process.env.PORT:", process.env.PORT ? "[FOUND]" : "[NOT FOUND]");
 
-// 2️⃣ Print token length and preview
+// 2️⃣ Token length & preview
 if (process.env.TOKEN) {
     console.log("TOKEN length:", process.env.TOKEN.length);
     console.log("TOKEN preview:", process.env.TOKEN.slice(0,5) + "..." + process.env.TOKEN.slice(-5));
@@ -22,7 +22,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// 4️⃣ Login with token and catch errors
+// 4️⃣ Try login with proper error handling
 (async () => {
     try {
         await client.login(process.env.TOKEN);
@@ -32,7 +32,7 @@ const client = new Client({
     }
 })();
 
-// 5️⃣ Optional: Listen to messages to test bot
+// 5️⃣ Optional: Ping test
 client.on('messageCreate', (message) => {
     if (message.content === '!ping') {
         message.reply('Pong!');
