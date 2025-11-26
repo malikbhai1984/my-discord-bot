@@ -2,8 +2,8 @@
 
 
 
-require('dotenv').config(); // only for local testing
-const { Client, GatewayIntentBits } = require('discord.js');
+import 'dotenv/config'; // automatically loads .env
+import { Client, GatewayIntentBits } from 'discord.js';
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
