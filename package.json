@@ -12,8 +12,15 @@
   "license": "MIT",
   "dependencies": {
     "discord.js": "^14.11.0"
+  },
+  {
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
   }
 }
+}
+
 
 
 
