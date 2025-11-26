@@ -1,40 +1,83 @@
-import 'dotenv/config'; // automatically loads .env locally
-import { Client, GatewayIntentBits } from 'discord.js';
 
-console.log("🚀 Starting bot debug check...");
 
-// 1️⃣ Check environment variables
-console.log("Checking environment variables...");
-console.log("process.env.TOKEN:", process.env.TOKEN ? "[FOUND]" : "[NOT FOUND]");
-console.log("process.env.API_FOOTBALL:", process.env.API_FOOTBALL ? "[FOUND]" : "[NOT FOUND]");
-console.log("process.env.PORT:", process.env.PORT ? "[FOUND]" : "[NOT FOUND]");
+import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
+import dotenv from "dotenv";
 
-// 2️⃣ Token length & preview
-if (process.env.TOKEN) {
-    console.log("TOKEN length:", process.env.TOKEN.length);
-    console.log("TOKEN preview:", process.env.TOKEN.slice(0,5) + "..." + process.env.TOKEN.slice(-5));
-} else {
-    console.error("❌ TOKEN not found! Check Railway Environment Variables or local .env file.");
+dotenv.config();
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
+});
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Replies with Pong!'),
+  
+  new SlashCommandBuilder()
+    .setName('predict')
+    .setDescription('Get football predictions'),
+  
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Show all commands'),
+].map(command => command.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+// Register slash commands
+async function registerCommands() {
+  try {
+    console.log('📋 Registering slash commands...');
+    
+    await rest.put(
+      Routes.applicationCommands(client.user?.id || 'your_bot_id_here'),
+      { body: commands }
+    );
+    
+    console.log('✅ Slash commands registered!');
+  } catch (error) {
+    console.error('❌ Error registering commands:', error);
+  }
 }
 
-// 3️⃣ Initialize Discord client
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+client.once('ready', async () => {
+  console.log(`✅ ${client.user.tag} is online!`);
+  await registerCommands();
 });
 
-// 4️⃣ Try login with proper error handling
-(async () => {
-    try {
-        await client.login(process.env.TOKEN);
-        console.log("✅ Bot logged in successfully!");
-    } catch (error) {
-        console.error("❌ Discord.js login error:", error.code || error.message);
-    }
-})();
+// Handle slash commands
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
 
-// 5️⃣ Optional: Ping test
-client.on('messageCreate', (message) => {
-    if (message.content === '!ping') {
-        message.reply('Pong!');
-    }
+  console.log(`🎯 Command: /${interaction.commandName}`);
+
+  if (interaction.commandName === 'ping') {
+    await interaction.reply('🏓 Pong! Slash command working! 🎉');
+  }
+
+  if (interaction.commandName === 'predict') {
+    const predictions = [
+      "⚽ **Man United 2-1 Liverpool** (85% confidence)",
+      "⚽ **Arsenal 1-1 Chelsea** (78% confidence)", 
+      "⚽ **Man City 3-0 Tottenham** (92% confidence)"
+    ];
+    
+    await interaction.reply(`🎯 **Today's Predictions:**\n${predictions.join('\n')}`);
+  }
+
+  if (interaction.commandName === 'help') {
+    const helpMessage = `
+**🤖 SLASH COMMANDS:**
+\`/ping\` - Test bot
+\`/predict\` - Get football predictions  
+\`/help\` - Show this message
+
+**No message permissions needed!** 🚀
+    `;
+    
+    await interaction.reply(helpMessage);
+  }
 });
+
+client.login(process.env.TOKEN);
