@@ -4,10 +4,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [GatewayIntentBits.Guilds]
 });
 
-// -------------------- Slash Commands --------------------
+// Slash commands
 const commands = [
   new SlashCommandBuilder()
     .setName('ping')
@@ -38,50 +38,38 @@ async function registerCommands() {
   }
 }
 
-// -------------------- Dummy Predictions --------------------
-function generateDummyPrediction() {
-  const teams = ["Man United", "Liverpool", "Arsenal", "Chelsea", "Man City", "Tottenham"];
-  const home = teams[Math.floor(Math.random() * teams.length)];
-  const away = teams[Math.floor(Math.random() * teams.length)];
-  const scoreHome = Math.floor(Math.random() * 4);
-  const scoreAway = Math.floor(Math.random() * 4);
-  const confidence = Math.floor(75 + Math.random() * 25); // 75% to 100%
-  return `⚽ **${home} ${scoreHome}-${scoreAway} ${away}** (${confidence}% confidence)`;
-}
+// Dummy predictions array
+const dummyPredictions = [
+  "⚽ Man United 2-1 Liverpool (85% confidence)",
+  "⚽ Arsenal 1-1 Chelsea (78% confidence)",
+  "⚽ Man City 3-0 Tottenham (92% confidence)"
+];
 
-// -------------------- Auto Messages --------------------
-async function sendAutoMessage(messageText) {
-  if (!client.isReady()) return;
-
-  client.guilds.cache.forEach(guild => {
-    guild.channels.cache
-      .filter(ch => ch.isTextBased() && ch.permissionsFor(client.user).has("SendMessages"))
-      .forEach(channel => {
-        channel.send(messageText);
-        console.log(`✅ Sent message to ${guild.name} -> ${channel.name}`);
-      });
-  });
-}
-
-// Send auto prediction automatically
-async function sendAutoPrediction() {
-  const prediction = generateDummyPrediction();
-  await sendAutoMessage(`🤖 **Automatic Prediction:**\n${prediction}`);
-}
-
-// -------------------- Bot Ready --------------------
+// Bot ready
 client.once('ready', async () => {
   console.log(`✅ ${client.user.tag} is online!`);
+
+  // Register slash commands
   await registerCommands();
 
-  // Welcome message when bot goes online
-  await sendAutoMessage("🤖 **Discard Bot is now ONLINE! Welcome!** 🚀");
+  // Welcome message
+  client.channels.cache.forEach(channel => {
+    if (channel.isTextBased()) {
+      channel.send("🤖 Discard Bot is now online! Welcome!");
+    }
+  });
 
-  // Start automatic predictions every 5–7 minutes
-  setInterval(sendAutoPrediction, Math.floor(5 + Math.random() * 2) * 60 * 1000); // 5–7 min
+  // Automatic predictions every 5 minutes
+  setInterval(() => {
+    client.channels.cache.forEach(channel => {
+      if (channel.isTextBased()) {
+        channel.send(`🎯 **Automatic Predictions:**\n${dummyPredictions.join("\n")}`);
+      }
+    });
+  }, 300000); // 300000 ms = 5 minutes
 });
 
-// -------------------- Slash Command Handler --------------------
+// Handle slash commands
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -92,12 +80,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.commandName === 'predict') {
-    const predictions = [
-      generateDummyPrediction(),
-      generateDummyPrediction(),
-      generateDummyPrediction()
-    ];
-    await interaction.reply(`🎯 **Today's Predictions:**\n${predictions.join('\n')}`);
+    await interaction.reply(`🎯 **Today's Predictions:**\n${dummyPredictions.join('\n')}`);
   }
 
   if (interaction.commandName === 'help') {
@@ -107,7 +90,7 @@ client.on('interactionCreate', async (interaction) => {
 \`/predict\` - Get football predictions  
 \`/help\` - Show this message
 
-**Automatic predictions every 5–7 minutes!** 🚀
+**No message permissions needed!** 🚀
     `;
     await interaction.reply(helpMessage);
   }
