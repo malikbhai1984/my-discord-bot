@@ -1,13 +1,13 @@
 {
-  "name": "football_bot",
+  "name": "football-bot",
   "version": "1.0.0",
-  "type": "module",
   "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "node-fetch": "^3.3.2",
-    "dotenv": "^16.4.5",
-       "moment-timezone": "^0.5.45",
-    "telegraf": "^4.12.2"
+    "axios": "^1.4.0",
+    "dotenv": "^16.3.1"
   }
 }
-
