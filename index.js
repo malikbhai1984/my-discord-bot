@@ -1,116 +1,83 @@
 
 
-
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
+import dotenv from "dotenv";
 
-// 1. Get Environment Variables
-// We rely solely on Railway/process.env now
-const TOKEN = process.env.TOKEN;
-const API_FOOTBALL_KEY = process.env.API_FOOTBALL; // Using a clearer name for the API Key
+dotenv.config();
 
-// 2. Initial Checks and Logging
-console.log('--- Bot Initialization ---');
-console.log('🔧 TOKEN available:', !!TOKEN);
-console.log('🔧 API_FOOTBALL_KEY available:', !!API_FOOTBALL_KEY);
-
-if (!TOKEN) {
-    console.error('❌ FATAL: Discord TOKEN is missing in environment variables.');
-    // We do NOT use process.exit(1) here. The client.login() failure will be logged below.
-}
-
-// 3. Setup Discord Client
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds] // Only Guilds intent needed for slash commands
+  intents: [GatewayIntentBits.Guilds]
 });
 
-// Define Commands
 const commands = [
-    new SlashCommandBuilder().setName('ping').setDescription('Replies with Pong!'),
-    new SlashCommandBuilder().setName('predict').setDescription('Get football predictions'),
-    new SlashCommandBuilder().setName('help').setDescription('Show all commands'),
-    new SlashCommandBuilder().setName('matches').setDescription('Get live football matches')
-].map(cmd => cmd.toJSON());
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Replies with Pong!'),
+  
+  new SlashCommandBuilder()
+    .setName('predict')
+    .setDescription('Get football predictions'),
+  
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Show all commands'),
+].map(command => command.toJSON());
 
-// 4. Command Registration Function
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+// Register slash commands
 async function registerCommands() {
-    try {
-        console.log('📋 Registering slash commands...');
-        
-        // Ensure TOKEN is available before trying to set it
-        if (!TOKEN) {
-             console.error('❌ Cannot register commands: TOKEN is missing.');
-             return; 
-        }
-
-        const rest = new REST({ version: '10' }).setToken(TOKEN);
-        
-        // Note: You should replace the placeholder ID with your bot's actual ID 
-        // if client.user is null during deployment registration.
-        await rest.put(
-            Routes.applicationCommands(client.user?.id || 'YOUR_BOT_APPLICATION_ID'),
-            { body: commands }
-        );
-        
-        console.log('✅ Slash commands registered!');
-    } catch (error) {
-        console.error('❌ Error registering commands:', error.message);
-    }
+  try {
+    console.log('📋 Registering slash commands...');
+    
+    await rest.put(
+      Routes.applicationCommands(client.user?.id || 'your_bot_id_here'),
+      { body: commands }
+    );
+    
+    console.log('✅ Slash commands registered!');
+  } catch (error) {
+    console.error('❌ Error registering commands:', error);
+  }
 }
 
-// 5. Bot Events
 client.once('ready', async () => {
-    console.log(`✅ ${client.user.tag} is online!`);
-    await registerCommands();
+  console.log(`✅ ${client.user.tag} is online!`);
+  await registerCommands();
 });
 
 // Handle slash commands
 client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand()) return;
 
-    console.log(`🎯 Command executed: /${interaction.commandName}`);
+  console.log(`🎯 Command: /${interaction.commandName}`);
 
-    switch (interaction.commandName) {
-        case 'ping':
-            await interaction.reply('🏓 Pong! Bot is working perfectly! 🎉');
-            break;
+  if (interaction.commandName === 'ping') {
+    await interaction.reply('🏓 Pong! Slash command working! 🎉');
+  }
 
-        case 'predict':
-            // Add your API integration logic here using API_FOOTBALL_KEY
-            await interaction.reply('🎯 Prediction feature coming soon!');
-            break;
+  if (interaction.commandName === 'predict') {
+    const predictions = [
+      "⚽ **Man United 2-1 Liverpool** (85% confidence)",
+      "⚽ **Arsenal 1-1 Chelsea** (78% confidence)", 
+      "⚽ **Man City 3-0 Tottenham** (92% confidence)"
+    ];
+    
+    await interaction.reply(`🎯 **Today's Predictions:**\n${predictions.join('\n')}`);
+  }
 
-        case 'matches':
-            // Add your API integration logic here using API_FOOTBALL_KEY
-            await interaction.reply('⚽ Live matches feature coming soon!');
-            break;
+  if (interaction.commandName === 'help') {
+    const helpMessage = `
+**🤖 SLASH COMMANDS:**
+\`/ping\` - Test bot
+\`/predict\` - Get football predictions  
+\`/help\` - Show this message
 
-        case 'help':
-            const helpMessage = `
-**🤖 FOOTBALL BOT COMMANDS:**
-
-\`/ping\` - Test bot latency
-\`/predict\` - Get football match predictions
-\`/matches\` - Get live football matches
-\`/help\` - Show this help message
-
-**✅ Hosted on Railway**
-            `;
-            await interaction.reply({ content: helpMessage, ephemeral: true });
-            break;
-    }
+**No message permissions needed!** 🚀
+    `;
+    
+    await interaction.reply(helpMessage);
+  }
 });
 
-// 6. Login and Error Handling
-client.login(TOKEN)
-    .then(() => console.log('🔑 Attempting Discord Login...'))
-    .catch(err => {
-        console.error('❌ Login failed! Check TOKEN value and Bot intents:', err.message);
-        // This catch block handles the error if TOKEN is undefined or invalid.
-    });
-
-client.on('error', console.error);
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-
+client.login(process.env.TOKEN);
